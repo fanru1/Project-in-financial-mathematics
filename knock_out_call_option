@@ -1,0 +1,163 @@
+import numpy as np
+import math
+import scipy.sparse
+import scipy.sparse.linalg
+import matplotlib.pyplot as plt
+
+def compute_sigma(t):
+    sigma=0.13*(1.25*t)**1.5
+    return sigma
+
+def compute_S_min(K,T):
+    sigma_1=compute_sigma(1)
+    log_S=(math.log(K)-1.5*math.log(0.0045)-8*2.5*sigma_1)/2.5
+    x=math.exp(log_S)
+    return x
+
+def bottom_boundary_condition(K,T,S_min,r,t):
+    return np.zeros(t.shape)
+
+def top_boundary_condition(K,T,B,r,t):
+    return np.zeros(t.shape)
+
+def final_boundary_condition(K,T,S):
+    f=np.maximum((0.0045*S)**1.5*S-K,0)
+    f[-1]=0
+    return f
+
+def compute_abc(K,T,sigma,r,S,dt,dS):
+    a=-(sigma**2)*(S**2)/(2*dS**2)+(r*S)/(2*dS)
+    b=(sigma**2)*(S**2)/dS**2+r
+    c=-(sigma**2)*(S**2)/(2*dS**2)-(r*S)/(2*dS)
+    return a,b,c
+
+def compute_labda(a,b,c):
+    return scipy.sparse.diags([a[1:],b,c[:-1]],offsets=[-1,0,1])
+
+def price_crank_nicolson(K,T,r,B,n_steps):
+    dt=T/n_steps
+    S_min=compute_S_min(K,T)
+    S_max=B
+    dS=(S_max-S_min)/n_steps
+    S=np.linspace(S_min,S_max,n_steps+1)
+    t=np.linspace(0,T,n_steps+1)
+    V=np.zeros((n_steps+1,n_steps+1))
+    
+    V[:,-1]=top_boundary_condition(K,T,B,r,t)
+    V[:,0]=bottom_boundary_condition(K,T,S_min,r,t)
+    V[-1,:]=final_boundary_condition(K,T,S)
+    identity=scipy.sparse.identity(n_steps-1)
+    
+    for i in range(n_steps-1,-1,-1):
+        sigma=compute_sigma(t[i+1])
+        a,b,c=compute_abc(K,T,sigma,r,S[1:-1],dt,dS)
+        labda=compute_labda(a,b,c)
+        V[i,1:n_steps]=scipy.sparse.linalg.spsolve(identity+0.5*labda*dt,(identity-0.5*labda*dt).dot(V[i+1,1:n_steps]))
+    return V,t,S
+
+K=114
+T=1
+r=0.0350
+B=222
+mu=0.0750
+S0=180.0000
+n_steps=1000
+V,t,S=price_crank_nicolson(K,T,r,B,n_steps)
+option_price=np.interp(S0,S,V[0,:])
+print (option_price)
+
+def plot(V,t,S):
+    t_mesh,S_mesh=np.meshgrid(t,S)
+    ax=plt.gca(projection='3d')
+    ax.plot_surface(t_mesh,S_mesh,V.T,alpha=0.3,edgecolor='k')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Stock price')
+    ax.set_zlabel('Option price')
+
+plot(V,t,S)
+
+def simulate_stock_price(S0,mu,t,T,n_steps,n_paths):
+    Z=np.zeros((n_paths,n_steps+1))
+    dt=T/n_steps
+    Z[:,0]=math.log(S0)
+    epsilon=np.random.randn(n_paths,n_steps)
+    sigma_matrix=compute_sigma(t)
+    for i in range (0,n_steps):
+        Z[:,i+1]=Z[:,i]+(mu-0.5*sigma_matrix[i]**2)*dt+sigma_matrix[i]*math.sqrt(dt)*epsilon[:,i]
+    Stock_price=np.exp(Z)
+    return Stock_price
+
+n_paths=1000
+
+def compute_delta(V,t,S,n_steps):
+    delta_matrix=np.zeros((n_steps+1,n_steps-1))
+    ds=(S[-1]-S[0])/n_steps
+    for i in range (0,n_steps-1):
+        delta_matrix[:,i]=(V[:,i+2]-V[:,i])/(2*ds)
+    return delta_matrix
+
+
+def simulate_delta_hedging(V,S0,mu,t,T,n_steps,n_paths,r,S):
+    stock_paths=simulate_stock_price(S0,mu,t,T,n_steps,n_paths)
+    Pi=np.zeros(stock_paths.shape)
+    option_price=np.interp(S0,S,V[0,:])
+    delta=compute_delta(V,t,S,n_steps)
+    Pi[:,0]=option_price
+    dt=T/n_steps
+    S_999=S[1:-1]
+    for i in range (0,n_steps):
+        S_t=stock_paths[:,i]
+        delta_t=np.interp(S_t,S_999,delta[i,:])
+        B_t=Pi[:,i]-S_t*delta_t
+        B_interest=B_t*math.exp(dt*r)
+        S_tplusdt=stock_paths[:,i+1]
+        stock_value=delta_t*S_tplusdt
+        Pi[:,i+1]=B_interest+stock_value
+    
+    delta_initial=delta_t=np.interp(S0,S_999,delta[0,:])
+    S_T=stock_paths[:,-1]
+    final_balance=Pi[:,-1]
+    error=final_balance-np.maximum((0.0045*S_T)**1.5*S_T-114,0)
+    return error, delta_initial
+
+error1,delta_initial=simulate_delta_hedging(V,S0,mu,t,T,n_steps,n_paths,r,S)
+print (delta_initial)
+top_percentile=np.percentile(error1,75)
+bottom_percentile=np.percentile(error1,25)
+print (top_percentile)
+print (bottom_percentile)
+plt.hist(error1)
+
+def price_S0(S0,K,T,r,B,n_steps):
+    V,t,S=price_crank_nicolson(K,T,r,B,n_steps)
+    option_price=np.interp(S0,S,V[0,:])
+    return option_price
+
+def price_array(S0,K,T,r,B,n_steps):
+    price=np.zeros(len(r))
+    for i in range (0,len(r)):
+        price[i]=price_S0(S0,K,T,r[i],B,n_steps)
+    return price
+
+K=114
+T=1
+B=222
+r_array=np.array([0.0250,0.030,0.0350,0.040,0.0450])
+mu=0.0750
+S0=180.0000
+n_steps=1000
+n_paths=1000
+p=price_array(S0,K,T,r_array,B,n_steps)
+print (p)
+
+
+K=114
+T=1
+B=222
+r_array=np.array([0.0250,0.030,0.0350,0.040,0.0450])
+mu=0.0750
+S0_new=210.0000
+n_steps=1000
+n_paths=1000
+p_new=price_array(S0_new,K,T,r_array,B,n_steps)
+print (p_new)
